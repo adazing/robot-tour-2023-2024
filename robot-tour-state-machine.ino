@@ -1,460 +1,619 @@
+#include <Wire.h>     // Include Wire library for I2C communication
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+#include "Optical_Flow_Sensor.h"
 
-#include "Wire.h"
-#include <MPU6050_light.h>
-#include <math.h>
+//optical flow sensor for drift
+Optical_Flow_Sensor flow(53, PAA5100);
+int16_t totalX = 0, totalY = 0;
+float error_drift = 0.0;
+float kp_drift = 100;
+float ki_drift = 0.5;
+float kd_drift = 0.5;
+float total_drift = 0.0;
+float prev_error_drift = 0.0;
 
-//distance sensor
-const int trigPin = 7;
-const int echoPin = 13;
+// CHANGE HERE"
+const char* paths[] = {"START", "FORWARD", "FORWARD", "FORWARD", "FORWARD", "FORWARD", "STOP"};
+int index = 0;
+float target_time = 15.0;
 
-//variables for PID control
-// float target = 0;
-float error = 0;
-float integral = 0;
-float derivative = 0;
-float last_error = 0;
-float angle = 0;
-// float 
+//time
+float time_per_step = 0.0;
+float start_time = 0.0;
+float goal_time = 0.0;
+float kp_time = .01;
+// float kp_time = 0;
+float left_over_time = 0.0;
+float error_time = 0.0;
 
-//the 'k' values are the ones you need to fine tune before your program will work. Note that these are arbitrary values that you just need to experiment with one at a time.
-float Kp = 0.7;
-float Ki = 0.0;
-float Kd = 0.4;
+// angle
+// float kp = 5.0;
+float kp = 0.0;
+float ki = 0.0;
+float kd = 0.0;
+float total = 0.0;
+float angle = 0.0; // actual angle value
+float prev_angle = 0.0;
+float error = 0.0; // derivation from 360
+float prev_error = 0.0;
 
-// IMU and Angles
-MPU6050 mpu(Wire);
-unsigned long timer = 0;
+// state machine
+bool started_new_action = true;
+int length = 48;
+volatile unsigned long prev_time = 0;
 
-volatile int target_angle = 0;
+// Optical Encoder Pins
+const int backLeftEncoder = 2;
+const int frontLeftEncoder = 3;
+const int frontRightEncoder = 18;
+const int backRightEncoder = 19;
 
-//ENCODERS
-const int ENCODER_PIN_A = 3;
-const int ENCODER_PIN_B = 2;
-volatile int count_pulses_A = 0;
-volatile int count_pulses_B = 0;
-const float stepcount = 20.0;
-const float wheeldiameter = 6.4;
-const int pointing_threshold = 1;
-const int rotation_threshold = 0.00;
-const int start_distance = 25;
-const int forward_distance = 50;
-// const int turn_distance = 14*3.14159/4;
-//FIX -- maybe don't need?
-const int turn_distance = 500;
+bool backLeftEncoderBool = false;
+bool frontLeftEncoderBool = false;
+bool frontRightEncoderBool = false;
+bool backRightEncoderBool = false;
 
-//MOTORS
+// Counters
+volatile long backLeftEncoderCount = 0;
+volatile long frontLeftEncoderCount = 0;
+volatile long frontRightEncoderCount = 0;
+volatile long backRightEncoderCount = 0;
 
-int STBY = 10; //standby
+// PWM speed to motor
+int pwmBackRight = 100;
+int pwmBackLeft = 100;
+int pwmFrontRight = 100;
+int pwmFrontLeft = 100;
 
-//Motor A
-int PWMA = 6; //Speed control 
-int AIN1 = 9; //Direction
-int AIN2 = 8; //Direction
+int baseSpeed = 165;
 
-//Motor B
-int PWMB = 5; //Speed control
-int BIN1 = 11; //Direction
-int BIN2 = 12; //Direction
+int backRightMillis = 0;
+int backLeftMillis = 0;
+int frontRightMillis = 0;
+int frontLeftMillis = 0;
 
-//orig speeds
-int orig_forward_speed = 75;
-int orig_turn_speed = 100;
+// PWM Motor Control Pins
+const int pwmBackRightMotor = 4;
+const int pwmBackLeftMotor = 5;
+const int pwmFrontRightMotor = 6;
+const int pwmFrontLeftMotor = 7;
 
-//current speeds
-int forward_speed=75;
-int turn_speed=90;
+// Input Control Pins for Motors
+const int input2BackRight = 22;
+const int input1BackRight = 23;
+const int input1BackLeft = 24;
+const int stbyBackMotors = 25;
+const int input2BackLeft = 26;
+const int input1FrontRight = 27;
+const int input2FrontRight = 28;
+const int stbyFrontMotors = 29;
+const int input1FrontLeft = 30;
+const int input2FrontLeft = 31;
 
-// State machine
-enum robot_states{
-  START,
-  IDLE,
-  FORWARD,
-  RIGHT,
-  LEFT,
-  BACKWARD,
-  WAIT,
-};
+uint16_t BNO055_SAMPLERATE_DELAY_MS = 100;
 
-//declare current state (start)
-robot_states current_state = START;
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
 
-//TIME
-unsigned long target_time = 40000;
-//current turn time (milliseconds)
-unsigned long turn_time = 910;
-//current move time (milliseconds)
-unsigned long move_time = 3500;
-//current start time (milliseconds)
-//unsigned long start_time = 1600;
-//holds number of turns that has happened so far
-int turn_count = 0;
-//holds number of moves that has happened so far
-int move_count = 0;
-//holds time where action began
-unsigned long old_time = 0;
-//holds total number of turns
-int total_turn_count = 0;
-//holds total number of moves
-int total_move_count = 0;
-//holds extra time that is not in the move
-unsigned long extra_time = 0;
-//holds target action time
-unsigned long target_action_time = 0;
 
-//CHANGE HEREE!!!!
-//HERRRREEE
-robot_states state_order[] = {LEFT, FORWARD, RIGHT, FORWARD, BACKWARD, IDLE};
-
-//int distance_order[] = {-1, 50};
-
-//bool using_distances = false;
-
-int state_order_idx = -1;
-
-bool started_new_state = true;
-
-int status;
-
-int CMtoSteps(float cm) { //converts centimeters to encoder steps
-  int result;  // Final calculation result
-  float circumference = wheeldiameter * 3.14159; // Calculate wheel circumference in cm
-  float cm_step = circumference / stepcount;  // CM per Step
-  
-  float f_result = cm / cm_step;  // Calculate result as a float
-  result = (int) f_result; // Convert to an integer (note this is NOT rounded)
-  
-  return result;  // End and return result
+void printCounters() {
+  Serial.print("Index: ");
+  Serial.print(index);
+  Serial.print(" State: ");
+  Serial.print(paths[index]);
+  Serial.print(" Back Left: ");
+  Serial.print(backLeftEncoderCount);
+  Serial.print(" Front Left: ");
+  Serial.print(frontLeftEncoderCount);
+  Serial.print(" Back Right: ");
+  Serial.print(backRightEncoderCount);
+  Serial.print(" Front Right: ");
+  Serial.println(frontRightEncoderCount);
 }
 
-void DCMotorAEncoder(){
-  count_pulses_A++;
+
+// Updates back left encoder
+void backLeftEncoderAdd() {
+  backLeftEncoderCount++;
+}
+
+
+// Updates front left encoder
+void frontLeftEncoderAdd() {
+  frontLeftEncoderCount++;
+}
+
+
+// Updates front right encoder
+void frontRightEncoderAdd() {
+  frontRightEncoderCount++;
+}
+
+
+// Updates back right encoder
+void backRightEncoderAdd() {
+  backRightEncoderCount++;
+}
+
+
+void updateCounters() {
+  if (backLeftEncoderBool == false && digitalRead(backLeftEncoder)) {  // RISING
+    backLeftEncoderBool = true;
+    backLeftEncoderAdd();
+  } else if (backLeftEncoderBool == true && !digitalRead(backLeftEncoder)) {  // FALLING
+    backLeftEncoderBool = false;
   }
 
-void DCMotorBEncoder(){
-  count_pulses_B++;
+
+  if (frontLeftEncoderBool == false && digitalRead(frontLeftEncoder)) {  // RISING
+    frontLeftEncoderBool = true;
+    frontLeftEncoderAdd();
+  } else if (frontLeftEncoderBool == true && !digitalRead(frontLeftEncoder)) {  // FALLING
+    frontLeftEncoderBool = false;
+  }
+
+
+  if (frontRightEncoderBool == false && digitalRead(frontRightEncoder)) {  // RISING
+    frontRightEncoderBool = true;
+    frontRightEncoderAdd();
+  } else if (frontRightEncoderBool == true && !digitalRead(frontRightEncoder)) {  // FALLING
+    frontRightEncoderBool = false;
+  }
+
+
+  if (backRightEncoderBool == false && digitalRead(backRightEncoder)) {  // RISING
+    backRightEncoderBool = true;
+    backRightEncoderAdd();
+  } else if (backRightEncoderBool == true && !digitalRead(backRightEncoder)) {  // FALLING
+    backRightEncoderBool = false;
+  }
 }
+
 
 void setup() {
+  // Initialize Serial Monitor
   Serial.begin(9600);
-  Serial.println("hi");
+
+
+  // Setup encoder pins
+  pinMode(backLeftEncoder, INPUT_PULLUP);
+  pinMode(frontLeftEncoder, INPUT_PULLUP);
+  pinMode(frontRightEncoder, INPUT_PULLUP);
+  pinMode(backRightEncoder, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(backLeftEncoder), backLeftEncoderAdd, RISING);
+  attachInterrupt(digitalPinToInterrupt(frontLeftEncoder), frontLeftEncoderAdd, RISING);
+  attachInterrupt(digitalPinToInterrupt(backRightEncoder), backRightEncoderAdd, RISING);
+  attachInterrupt(digitalPinToInterrupt(frontRightEncoder), frontRightEncoderAdd, RISING);
+
+
+  // Setup motor PWM pins
+  pinMode(pwmBackRightMotor, OUTPUT);
+  pinMode(pwmBackLeftMotor, OUTPUT);
+  pinMode(pwmFrontRightMotor, OUTPUT);
+  pinMode(pwmFrontLeftMotor, OUTPUT);
+
+
+  // Setup motor control pins
+  pinMode(input2BackRight, OUTPUT);
+  pinMode(input1BackRight, OUTPUT);
+  pinMode(input1BackLeft, OUTPUT);
+  pinMode(stbyBackMotors, OUTPUT);
+  pinMode(input2BackLeft, OUTPUT);
+  pinMode(input1FrontRight, OUTPUT);
+  pinMode(input2FrontRight, OUTPUT);
+  pinMode(stbyFrontMotors, OUTPUT);
+  pinMode(input1FrontLeft, OUTPUT);
+  pinMode(input2FrontLeft, OUTPUT);
+
+
+  // Initialize I2C for MPU6050
   Wire.begin();
-  Serial.println("targettime4");
-  Serial.println(turn_time);
-  
-  //distance sensor
-  pinMode(trigPin, OUTPUT);
-  pinMode(echoPin, INPUT);
-  Serial.begin(9600);
+  if (!bno.begin())
+  {
+    /* There was a problem detecting the BNO055 ... check your connections */
+    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+    while (1);
+  }
 
-  status = mpu.begin();
-  Serial.print(F("MPU6050 status: "));
-  Serial.println(status);
-  
-  Serial.println(F("Calculating offsets, do not move MPU6050"));
+  if (!flow.begin()) {
+    Serial.println("Initialization of the flow sensor failed");
+    while(1) { }
+  }
 
-  // mpu.upsideDownMounting = true; // uncomment this line if the MPU6050 is mounted upside-down
-  mpu.calcOffsets(); // gyro and accelero
-  Serial.println("Done! Starting Robot! \n");
-
-  //ENCODERS
-  pinMode(ENCODER_PIN_A, INPUT);
-  pinMode(ENCODER_PIN_B, INPUT);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_PIN_A),DCMotorAEncoder,RISING);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_PIN_B),DCMotorBEncoder,RISING);
-
-  //MOTORS
-  pinMode(STBY, OUTPUT);
-
-  pinMode(PWMA, OUTPUT);
-  pinMode(AIN1, OUTPUT);
-  pinMode(AIN2, OUTPUT);
-
-  pinMode(PWMB, OUTPUT);
-  pinMode(BIN1, OUTPUT);
-  pinMode(BIN2, OUTPUT);
-
-  Serial.println("target time 2");
-  Serial.println(target_time);
-
-  //count total number of turns, moves
-  for (int i = 0; i < sizeof(state_order)/sizeof(state_order[1]); i++) {
-    if (state_order[i] == RIGHT || state_order[i] == LEFT){
-      total_turn_count++;
-    }else if(state_order[i] == FORWARD || state_order[i] == BACKWARD){
-      total_move_count++;
+  // calculate time per step
+  float num_steps = 0.0;
+  for (int x = 0; x<sizeof(paths)/sizeof(paths[0]); x++){
+    if (paths[x]=="FORWARD" || paths[x]=="BACKWARD" || paths[x]=="LEFT" || paths[x]=="RIGHT"){
+      num_steps += 1;
+    }else if (paths[x]=="START"){
+      num_steps += 0.5;
     }
   }
-  Serial.println("blah");
-  Serial.println(total_turn_count);
-  Serial.println(total_move_count);
-  Serial.println("target time 3");
-  Serial.println(target_time);
+  time_per_step = target_time / num_steps;
+
+
+  // Ensure motors are off by default
+  digitalWrite(stbyBackMotors, LOW);
+  digitalWrite(stbyFrontMotors, LOW);
 }
 
-void reset(){
-  count_pulses_A = 0;  //  reset counter A to zero
-  count_pulses_B = 0;  //  reset counter B to zero
 
-  old_time = millis();
-
-  started_new_state=false;
-
-  error = 0;
-  integral = 0;
-  derivative = 0;
-  last_error = 0;
-  angle = 0;
-  digitalWrite(STBY, HIGH); //disable standby
+int cmToTicks(int cm) {
+  return (int)(cm * 20 / (6.5 * 3.14159));
 }
 
-void new_state(){
-  digitalWrite(STBY, LOW); //enable standby
-  state_order_idx++;
-  started_new_state=true;
-  current_state = state_order[state_order_idx];
+
+void resetCounters() {
+  backLeftEncoderCount = 0;
+  frontLeftEncoderCount = 0;
+  frontRightEncoderCount = 0;
+  backRightEncoderCount = 0;
+  // totalY = 0;
+  // totalX = 0;
+  total_drift = 0;
 }
 
-void move(bool is_forward){
-  float angle_output;
-  if (status==0){
-    angle_output = mpu.getAngleZ();
+
+float calculateError(float angle){
+  if (angle < 180){
+    return angle;
   }else{
-    angle_output = 0;
-  }
-  error = target_angle - angle_output;// proportional
-  integral = integral + error; //integral
-  derivative = error - last_error; //derivative
-  last_error=error;
-  angle = (error * Kp) + (integral*Ki) + (derivative * Kd);
-  int motorspeeda = forward_speed + angle;
-  int motorspeedb = forward_speed - angle;
-  if (is_forward==false){
-    motorspeeda = forward_speed - angle;
-    motorspeedb = forward_speed + angle;
-  }
-
-  if(error!=0){//motor A or B is going too fast or too slow
-    analogWrite(PWMA, motorspeeda);
-    analogWrite(PWMB, motorspeedb);
-  }else{//motors are moving at good pace, continue
-      analogWrite(PWMA, forward_speed);
-      analogWrite(PWMB, forward_speed);       
+    return angle-360;
   }
 }
 
-void loop() {
-  if (status==0){
-    mpu.update();
-  }
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  long duration = pulseIn(echoPin, HIGH);
-  int distance = duration * 0.034 / 2;
 
-  if (current_state == WAIT){
-    unsigned long time_spent_so_far = millis()-old_time;
-    //Serial.print(started_new_state);
-   //Serial.print("WAITING, extra time: ");
-  //  Serial.print(extra_time);
-  //  Serial.print(" time spent so far: ");
-  //  Serial.println(time_spent_so_far);
-  //  Serial.println(started_new_state);
-  //  Serial.println(time_spent_so_far>extra_time);
-    analogWrite(PWMA, 0);
-    analogWrite(PWMB, 0);
-    // Set Motor A backwards
-    digitalWrite(AIN1, LOW);
-    digitalWrite(AIN2, LOW);
-    
-    // Set Motor B forward
-    digitalWrite(BIN1, LOW);
-    digitalWrite(BIN2, LOW);
-    if (started_new_state){
-      Serial.println("WAITING, extra time: ");
-      Serial.println(extra_time);
-      reset();
-      digitalWrite(STBY, LOW); //enable standby
-    } else if (time_spent_so_far>extra_time || time_spent_so_far>2000){
-
-      new_state();
-    }else{
-
+int medianTick(int backLeftEncoderCount, int frontLeftEncoderCount, int frontRightEncoderCount, int backRightEncoderCount) {
+  // Store the counts in an array for easier sorting
+  int counts[4] = {backLeftEncoderCount, frontLeftEncoderCount, frontRightEncoderCount, backRightEncoderCount};
+ 
+  // Sort the array of counts
+  for (int i = 0; i < 4; i++) {
+    for (int j = i + 1; j < 4; j++) {
+      if (counts[i] > counts[j]) {
+        int temp = counts[i];
+        counts[i] = counts[j];
+        counts[j] = temp;
+      }
     }
   }
-  else if (current_state==START){
-      int steps = CMtoSteps(start_distance);      
-      if (started_new_state){
-        reset();
-        Serial.println("Start");
-        target_time += millis();
-        //start_time = millis()-old_time;
-        // Set Motor A forward
-        digitalWrite(AIN1, HIGH);
-        digitalWrite(AIN2, LOW);
-      
-        // Set Motor B forward
-        digitalWrite(BIN1, HIGH);
-        digitalWrite(BIN2, LOW);
-      }else if (count_pulses_A>steps || count_pulses_B>steps || millis()-old_time>10000){ // finished!
-        //Serial.print("start_time");
-        //Serial.println(start_time);
-        new_state();
-        //Serial.println("target time 1");
-        //Serial.println(target_time);        
-      }else{ //continue moving forward!
-        //Serial.println(count_pulses_A);
-        //Serial.println(count_pulses_B);
-        move(true);
-      }
-  } else if (current_state==RIGHT){
-      int steps = CMtoSteps(turn_distance);
-      float angle_output;
-      if (status==0){
-        angle_output = mpu.getAngleZ();
-      }else{
-        angle_output = 0;
-      }
-      //Serial.println(angle_output);
-      if (started_new_state){
-        Serial.println("Right");
-        reset();
-        target_action_time = (target_time-old_time)*turn_time/((total_turn_count-turn_count)*turn_time+(total_move_count-move_count)*move_time);
-        turn_speed = min(100, max(orig_turn_speed*(turn_time/target_action_time), 60));
-        target_angle-=90;
-        // Set Motor A backwards
-        digitalWrite(AIN1, LOW);
-        digitalWrite(AIN2, HIGH);
-        
-        // Set Motor B forward
-        digitalWrite(BIN1, HIGH);
-        digitalWrite(BIN2, LOW);
-      }else if (angle_output<=target_angle || (count_pulses_A>steps || count_pulses_B>steps)){ // finished!
-        unsigned long time_spent_so_far = millis()-old_time;
-          Serial.println(target_action_time);
-          Serial.println(time_spent_so_far);
-        turn_count++;
-        if (time_spent_so_far<target_action_time){
-          current_state = WAIT;
-          extra_time = target_action_time-time_spent_so_far;
-          started_new_state=true;
-          Serial.println(extra_time);
-        }else{
-          new_state();
-        }
-      }else{ //continue moving forward!
-            analogWrite(PWMA, max(60, turn_speed*abs(target_angle-angle_output)/90));
-            analogWrite(PWMB, max(60, turn_speed*abs(target_angle-angle_output)/90));       
-      }
-  } else if (current_state==LEFT){
-      int steps = CMtoSteps(turn_distance);
 
-      float angle_output;
-      if (status==0){
-        angle_output = mpu.getAngleZ();
-      }else{
-        angle_output = 0;
-      }  
-      if (started_new_state){
-        reset();
-        Serial.println("Left");
-        target_angle+=90;
-        target_action_time = (target_time-old_time)*turn_time/((total_turn_count-turn_count)*turn_time+(total_move_count-move_count)*move_time);
-        turn_speed = min(100, max(orig_turn_speed*(turn_time/target_action_time), 60));
-        digitalWrite(AIN1, HIGH);
-        digitalWrite(AIN2, LOW);
-      
-        // Set Motor B backwards
-        digitalWrite(BIN1, LOW);
-        digitalWrite(BIN2, HIGH);
-      }else if (angle_output>=target_angle || (count_pulses_A>steps || count_pulses_B>steps)){ // finished!
-        unsigned long time_spent_so_far = millis()-old_time;
-        turn_count++;
-          Serial.println(target_action_time);
-          Serial.println(time_spent_so_far);
-        if (time_spent_so_far<target_action_time){
-          current_state = WAIT;
-          extra_time = target_action_time-time_spent_so_far;
-          started_new_state=true;
-          Serial.println(extra_time);
-        }else{
-          new_state();
-        }
-      }else{ //continue moving forward!
-            analogWrite(PWMA, max(60, turn_speed*abs(target_angle-angle_output)/90));
-            analogWrite(PWMB, max(60, turn_speed*abs(target_angle-angle_output)/90));     
-      }
-  } else if (current_state==FORWARD){
-      int steps = CMtoSteps(forward_distance);
-      if (started_new_state){
-        reset();
-        Serial.println("FORWARD");
-        target_action_time = (target_time-old_time)*move_time/((total_turn_count-turn_count)*turn_time+(total_move_count-move_count)*move_time);
-        forward_speed = min(100, max(orig_forward_speed*(move_time/target_action_time), 70));
-        //Serial.println("Forward");
-        //Serial.println(target_angle);
-        // Set Motor A forward
-        digitalWrite(AIN1, HIGH);
-        digitalWrite(AIN2, LOW);
-      
-        // Set Motor B forward
-        digitalWrite(BIN1, HIGH);
-        digitalWrite(BIN2, LOW);
-      }else if (count_pulses_A>steps && count_pulses_B>steps){ // finished! not using distances
-        // Serial.println("hi!");
-        unsigned long time_spent_so_far = millis()-old_time;
-          Serial.println(target_action_time);
-          Serial.println(time_spent_so_far);
-        move_count++;
 
-        if (time_spent_so_far<target_action_time){
-          current_state = WAIT;
-          extra_time = target_action_time-time_spent_so_far;
-          started_new_state=true;
-          Serial.println(extra_time);
-        }else{
-          new_state();
-        }
-      }else{ //continue moving forward!
-        //Serial.println(count_pulses_A);
-        //Serial.println(count_pulses_B);
-        move(true);
-      }
-  } else if (current_state==BACKWARD){
-      int steps = CMtoSteps(forward_distance);      
-      if (started_new_state){
-        Serial.println("backward");
-        reset();
-        target_action_time = (target_time-old_time)*move_time/((total_turn_count-turn_count)*turn_time+(total_move_count-move_count)*move_time);
-        forward_speed = min(100, max(orig_forward_speed*(move_time/target_action_time), 70));
+  // Calculate the median as the average of the two middle values
+  float median = (counts[1] + counts[2]) / 2.0;
+  return median;
 
-        //Serial.println("Forward");
-        //Serial.println(target_angle);
-        // Set Motor A backward
-        digitalWrite(AIN1, LOW);
-        digitalWrite(AIN2, HIGH);
-      
-        // Set Motor B backward
-        digitalWrite(BIN1, LOW);
-        digitalWrite(BIN2, HIGH);
-      }else if (count_pulses_A>steps && count_pulses_B>steps){ // finished!
-        unsigned long time_spent_so_far = millis()-old_time;
-          Serial.println(target_action_time);
-          Serial.println(time_spent_so_far);
-        move_count++;
+  goal_time = millis();
+}
 
-        if (time_spent_so_far<target_action_time){
-          current_state = WAIT;
-          extra_time = target_action_time-time_spent_so_far;
-          started_new_state=true;
-          Serial.println(extra_time);
-        }else{
-          new_state();
-        }
-      }else{ //continue moving forward!
-        move(false);
-      }
+
+void adjustMotors() {
+  // calculate change in time
+  unsigned long curr_time = millis();
+  // float dt = curr_time - prev_time;
+  float dt = 10;
+  prev_time = curr_time;
+
+  // read angle
+  sensors_event_t event;
+  bno.getEvent(&event);
+  angle = event.orientation.x;
+  error = calculateError(angle);
+  float theta = 90-(angle+prev_angle)/2;
+  prev_angle = angle;
+  // angle = 90 - angle;
+  Serial.print(" theta ");
+  Serial.print(theta);
+
+  // calculate angle derivative
+  float derivative = (error-prev_error) / dt;
+  prev_error = error;
+
+
+  // read optical flow sensor
+  int16_t deltaX, deltaY;
+  // float deltaX, deltaY;
+  flow.readMotionCount(&deltaX, &deltaY);
+  float adj_deltaX = (float) deltaX / (float) dt;
+  float adj_deltaY = (float) deltaY / (float) dt;
+  float pythag = sqrt((float) pow(adj_deltaX, 2) + (float) pow(adj_deltaY, 2));
+  //calculate totalX and totalY
+  Serial.print(" adj_deltaX ");
+  Serial.print(adj_deltaX);
+  Serial.print(" adj_deltaY ");
+  Serial.print(adj_deltaY);
+  totalX += adj_deltaX*pythag*cos(theta*0.0174533);
+  totalY += adj_deltaY*pythag*sin(theta*0.0174533);
+  // totalX += deltaX;
+  // totalY += deltaY;
+  Serial.print(" adjustment x ");
+  Serial.print(adj_deltaX*pythag*cos(theta*0.0174533));
+  Serial.print(" adjustment y ");
+  Serial.print(adj_deltaX*pythag*sin(theta*0.0174533));
+
+  //calculate drift error
+  error_drift = totalX;
+  if (paths[index] == "FORWARD" || paths[index] == "BACKWARD" || paths[index] == "START"){
+    error_drift = totalY;
+  }
+
+
+  float derivative_drift = (error_drift - prev_error_drift)/dt;
+  prev_error_drift = error_drift;
+  total += error*dt;
+
+
+  total_drift += error_drift*dt;
+  total = max(-100, min(100, total));
+  total_drift = max(-100, min(100, total));
+  float correction =  kp * error + kd * derivative + ki * total;
+  float time_correction = min(max(0, 1+kp_time * error_time/1000), 1);
+  float drift_correction = kp_drift * error_drift + kd_drift * derivative_drift + ki * total_drift;
+
+  // float drift_correction = 0.0;
+  baseSpeed = baseSpeed*time_correction;
+  Serial.print("drift correction ");
+  Serial.print(drift_correction);
+  Serial.print(" total x ");
+  Serial.print(totalX);
+  Serial.print(" total y ");
+  Serial.println(totalY);
+  if (paths[index] == "FORWARD" || paths[index] == "START"){
+    // pwmFrontLeft = baseSpeed;
+    // pwmFrontRight = baseSpeed;
+    // pwmBackLeft = baseSpeed;
+    // pwmBackRight = baseSpeed;
+    // pwmFrontLeft = min(max(baseSpeed - correction + drift_correction, 75), 255);
+    // pwmFrontRight = min(max(baseSpeed + correction - drift_correction, 75), 255);
+    // pwmBackLeft = min(max(baseSpeed - correction - drift_correction, 75), 255);
+    // pwmBackRight = min(max(baseSpeed + correction + drift_correction, 75), 255);
+    pwmFrontLeft = min(max(baseSpeed*min(max(1+drift_correction, 0), 1) - correction, 75), 255);
+    pwmFrontRight = min(max(baseSpeed*min(max(1-drift_correction, 0), 1) + correction, 75), 255);
+    pwmBackLeft = min(max(baseSpeed*min(max(1-drift_correction, 0), 1) - correction, 75), 255);
+    pwmBackRight = min(max(baseSpeed*min(max(1+drift_correction, 0), 1) + correction, 75), 255);
+
+  } else if (paths[index]=="BACKWARD"){
+    // pwmFrontLeft = min(max(baseSpeed + correction + drift_correction, 75), 255);
+    // pwmFrontRight = min(max(baseSpeed - correction - drift_correction, 75), 255);
+    // pwmBackLeft = min(max(baseSpeed + correction - drift_correction, 75), 255);
+    // pwmBackRight = min(max(baseSpeed - correction + drift_correction, 75), 255);
+
+    pwmFrontLeft = min(max(baseSpeed*min(max(1+drift_correction, 0), 1) + correction, 75), 255);
+    pwmFrontRight = min(max(baseSpeed*min(max(1-drift_correction, 0), 1) - correction, 75), 255);
+    pwmBackLeft = min(max(baseSpeed*min(max(1-drift_correction, 0), 1) + correction, 75), 255);
+    pwmBackRight = min(max(baseSpeed*min(max(1+drift_correction, 0), 1) - correction, 75), 255);
+
+  } else if (paths[index]=="LEFT"){
+    // pwmFrontLeft = -min(max(baseSpeed + correction - drift_correction, 75), 255);
+    // pwmFrontRight = min(max(baseSpeed + correction + drift_correction, 75), 255);
+    // pwmBackLeft = min(max(baseSpeed - correction - drift_correction, 75), 255);
+    // pwmBackRight = -min(max(baseSpeed - correction + drift_correction, 75), 255);
+    pwmFrontLeft = -min(max(baseSpeed*min(max(1-drift_correction, 0), 1) + correction, 75), 255);
+    pwmFrontRight = min(max(baseSpeed*min(max(1+drift_correction, 0), 1) + correction, 75), 255);
+    pwmBackLeft = min(max(baseSpeed*min(max(1-drift_correction, 0), 1) - correction, 75), 255);
+    pwmBackRight = -min(max(baseSpeed*min(max(1+drift_correction, 0), 1) - correction, 75), 255);
+
+  } else {
+    // pwmFrontLeft = min(max(baseSpeed - correction + drift_correction, 75), 255);
+    // pwmFrontRight = -min(max(baseSpeed - correction - drift_correction, 75), 255);
+    // pwmBackLeft = -min(max(baseSpeed + correction + drift_correction, 75), 255);
+    // pwmBackRight = min(max(baseSpeed + correction - drift_correction, 75), 255);
+    pwmFrontLeft = min(max(baseSpeed*min(max(1+drift_correction, 0), 1) - correction, 75), 255);
+    pwmFrontRight = -min(max(baseSpeed*min(max(1-drift_correction, 0), 1) - correction, 75), 255);
+    pwmBackLeft = -min(max(baseSpeed*min(max(1+drift_correction, 0), 1) + correction, 75), 255);
+    pwmBackRight = min(max(baseSpeed*min(max(1-drift_correction, 0), 1) + correction, 75), 255);
+
   }
 }
+
+void moveWheel(int input1, int input2, int pwm, int speed) {
+  if (speed>0){
+    digitalWrite(input1, HIGH);
+    digitalWrite(input2, LOW);
+    analogWrite(pwm, speed);
+  } else{
+    digitalWrite(input1, LOW);
+    digitalWrite(input2, HIGH);
+    analogWrite(pwm, -speed);
+  }
+}
+
+// Function to move the robot forward
+void moveForward() {
+  digitalWrite(stbyBackMotors, HIGH);   // Enable back motors
+  digitalWrite(stbyFrontMotors, HIGH);  // Enable front motors
+
+  // Set motor direction
+  moveWheel(input1BackRight, input2BackRight, pwmBackRightMotor, pwmBackRight);
+
+  moveWheel(input1BackLeft, input2BackLeft, pwmBackLeftMotor, pwmBackLeft);
+
+  moveWheel(input1FrontRight, input2FrontRight, pwmFrontRightMotor, pwmFrontRight);
+
+  moveWheel(input1FrontLeft, input2FrontLeft, pwmFrontLeftMotor, pwmFrontLeft);
+}
+
+
+// Function to move the robot backward
+void moveBackward() {
+  digitalWrite(stbyBackMotors, HIGH);   // Enable back motors
+  digitalWrite(stbyFrontMotors, HIGH);  // Enable front motors
+
+  moveWheel(input1BackRight, input2BackRight, pwmBackRightMotor, -pwmBackRight);
+
+  moveWheel(input1BackLeft, input2BackLeft, pwmBackLeftMotor, -pwmBackLeft);
+
+  moveWheel(input1FrontRight, input2FrontRight, pwmFrontRightMotor, -pwmFrontRight);
+
+  moveWheel(input1FrontLeft, input2FrontLeft, pwmFrontLeftMotor, -pwmFrontLeft);
+
+
+}
+
+
+// Function to turn the robot
+void strafeLeft() {
+  digitalWrite(stbyBackMotors, HIGH);   // Enable back motors
+  digitalWrite(stbyFrontMotors, HIGH);  // Enable front motors
+
+  moveWheel(input1BackRight, input2BackRight, pwmBackRightMotor, pwmBackRight);
+
+  moveWheel(input1BackLeft, input2BackLeft, pwmBackLeftMotor, pwmBackLeft);
+
+  moveWheel(input1FrontRight, input2FrontRight, pwmFrontRightMotor, pwmFrontRight);
+
+  moveWheel(input1FrontLeft, input2FrontLeft, pwmFrontLeftMotor, pwmFrontLeft);
+
+}
+
+
+// Function to turn the robot
+void strafeRight() {
+  digitalWrite(stbyBackMotors, HIGH);   // Enable back motors
+  digitalWrite(stbyFrontMotors, HIGH);  // Enable front motors
+
+
+  moveWheel(input1BackRight, input2BackRight, pwmBackRightMotor, pwmBackRight);
+
+  moveWheel(input1BackLeft, input2BackLeft, pwmBackLeftMotor, pwmBackLeft);
+
+  moveWheel(input1FrontRight, input2FrontRight, pwmFrontRightMotor, pwmFrontRight);
+
+  moveWheel(input1FrontLeft, input2FrontLeft, pwmFrontLeftMotor, pwmFrontLeft);
+
+}
+
+
+// Function to stop all motors
+void stopMotors() {
+  // turn motors off
+  digitalWrite(stbyBackMotors, LOW);
+  digitalWrite(stbyFrontMotors, LOW);
+  // Set all motors to low
+  analogWrite(pwmBackRightMotor, 0);
+  analogWrite(pwmBackLeftMotor, 0);
+  analogWrite(pwmFrontRightMotor, 0);
+  analogWrite(pwmFrontLeftMotor, 0);
+}
+
+
+
+void loop() {  // turn = 19 cm
+
+  // Serial.print(" total x ");
+  // Serial.print(totalX);
+  // Serial.print(" total y ");
+  // Serial.println(totalY);
+  if (paths[index] == "FORWARD"){
+    if (started_new_action){
+      left_over_time += goal_time - millis();
+      start_time = millis();
+      goal_time = start_time + time_per_step*1000 + left_over_time;
+      started_new_action = false;
+      resetCounters();
+      length = 68;
+    }else{
+      if (medianTick(backLeftEncoderCount, frontLeftEncoderCount, frontRightEncoderCount, backRightEncoderCount)>length){
+        started_new_action = true;
+        stopMotors();
+        index++;
+      }else{
+        moveForward();
+      }
+    }
+  } else if (paths[index] == "BACKWARD"){
+    if (started_new_action){
+      left_over_time += goal_time - millis();
+      start_time = millis();
+      goal_time = start_time + time_per_step*1000 + left_over_time;
+      started_new_action = false;
+      resetCounters();
+      length = 68;
+    }else{
+      if (medianTick( backLeftEncoderCount, frontLeftEncoderCount, frontRightEncoderCount, backRightEncoderCount)>length){
+        started_new_action = true;
+        stopMotors();
+        index++;
+      }else{
+        moveBackward();
+      }
+    }
+  } else if (paths[index] == "START"){
+    if (started_new_action){
+      left_over_time += goal_time - millis();
+      start_time = millis();
+      goal_time = start_time + time_per_step*1000/2 + left_over_time;
+      started_new_action = false;
+      resetCounters();
+      length = 34;
+    }else{
+      Serial.print(" ticks ");
+      Serial.print(medianTick( backLeftEncoderCount, frontLeftEncoderCount, frontRightEncoderCount, backRightEncoderCount));
+      if (medianTick( backLeftEncoderCount, frontLeftEncoderCount, frontRightEncoderCount, backRightEncoderCount)>length){
+        started_new_action = true;
+        Serial.print(" finished ");
+        stopMotors();
+        index++;
+      }else{
+        moveForward();
+      }
+    }
+  } else if (paths[index] == "RIGHT"){
+    if (started_new_action){
+      left_over_time += goal_time - millis();
+      start_time = millis();
+      goal_time = start_time + time_per_step*1000 + left_over_time;
+      started_new_action = false;
+      resetCounters();
+      length = 73;
+    }else{
+      if (medianTick( backLeftEncoderCount, frontLeftEncoderCount, frontRightEncoderCount, backRightEncoderCount)>length){
+        started_new_action = true;
+        stopMotors();
+        index++;
+      }else{
+        strafeRight();
+      }
+    }
+  } else if (paths[index] == "LEFT"){
+    if (started_new_action){
+      left_over_time += goal_time - millis();
+      start_time = millis();
+      goal_time = start_time + time_per_step*1000 + left_over_time;
+      started_new_action = false;
+      resetCounters();
+      length = 73;
+    }else{
+      if (medianTick( backLeftEncoderCount, frontLeftEncoderCount, frontRightEncoderCount, backRightEncoderCount)>length){
+        started_new_action = true;
+        stopMotors();
+        index++;
+      }else{
+        strafeLeft();
+      }
+    }
+  } else {
+    stopMotors();
+    while (true) {
+      delay(100);
+    }
+  }
+
+  adjustMotors();
+  error_time = (millis() - start_time) - (float)medianTick(backLeftEncoderCount, frontLeftEncoderCount, frontRightEncoderCount, backRightEncoderCount)/(float)length * (goal_time-start_time);
+
+  // if (paths[index] == "FORWARD" || paths[index] == "BACKWARD" || paths[index] == "START"){
+  //   error_drift = totalY;
+  // } else {
+  //   error_drift = totalX;
+  // }
+
+  Serial.print(" ");
+  Serial.print(error_time);
+  Serial.print(" ");
+  Serial.print(paths[index]);
+  Serial.print(" ");
+}
+
+
